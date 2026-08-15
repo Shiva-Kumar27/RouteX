@@ -1,4 +1,4 @@
-# Hyderabad Commute Route Optimizer
+# RouteX
 
 A shortest-path routing engine built on real OpenStreetMap data for Hyderabad, India. Given two locations, it computes the optimal route using either Dijkstra's algorithm or A* search, exposed over a REST API.
 
