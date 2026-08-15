@@ -2,8 +2,6 @@
 
 A shortest-path routing engine built on real OpenStreetMap data for Hyderabad, India. Given two locations, it computes the optimal route using either Dijkstra's algorithm or A* search, exposed over a REST API.
 
-This project was built to go deep on graph algorithms, real-world data engineering, and clean software design — not to wrap a tutorial. Every design decision below is one I can defend in a technical interview.
-
 ---
 
 ## What it does
