@@ -1,0 +1,23 @@
+# Maven build output
+target/
+
+# IDE
+.idea/
+*.iml
+out/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Large data files — don't commit raw OSM exports
+*Source.json
+*astar.json
+*dijkstra.json
+!package.json
+
+# Application config with local paths/secrets (if you add DB creds later)
+application-local.properties
