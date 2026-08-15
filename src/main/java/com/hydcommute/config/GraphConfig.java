@@ -22,7 +22,7 @@ import java.io.IOException;
 @Configuration
 public class GraphConfig {
 
-    @Value("${route-optimizer.graph-file:Source.json}")
+    @Value("${route-optimizer.graph-file:sample-graph.json}")
     private String graphFilePath;
 
     @Bean
