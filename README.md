@@ -1,87 +1,100 @@
 # RouteX
 
-A shortest-path routing engine built on real OpenStreetMap data for Hyderabad, India. Given two locations, it computes the optimal route using either Dijkstra's algorithm or A* search, exposed over a REST API.
+A shortest-path routing engine over real OpenStreetMap data for Hyderabad, India, with a machine-learning model that estimates travel time from time of day. Routing is exposed over a Spring Boot REST API using either Dijkstra's algorithm or A*.
 
----
+## Highlights
 
-## What it does
-
-- Parses a live Overpass API export of Hyderabad's road network into an in-memory graph (**700,614 nodes**, **1,518,327 directed edges**)
-- Computes shortest paths between any two nodes using either Dijkstra or A*
-- Exposes routing over a REST endpoint, with algorithm selectable per-request
-- Reports path, total distance, nodes explored, and time taken — so the two algorithms can be benchmarked head-to-head on the same query
-
-## Why this project
-
-Most portfolio projects reuse toy datasets or wrap someone else's algorithm library. This one:
-- Uses **real, messy OSM data** — including oneway streets, disconnected clipped regions, and missing node references — which forces actual data-engineering decisions, not just algorithm implementation
-- Implements Dijkstra and A* **from scratch**, not via a library, so the tradeoffs are provable rather than assumed
-- Is structured around the **Strategy Pattern**, so the algorithm choice is a runtime parameter, not a hardcoded path — this is the detail most portfolio projects skip and the one most likely to come up in an LLD interview
-
----
+- Parses an Overpass API export of Hyderabad's road network into an in-memory directed graph (700,614 nodes, 1,518,327 directed edges)
+- Dijkstra and A* implemented from scratch, swappable per request via the Strategy Pattern
+- A* with a haversine heuristic explores 79% fewer nodes and runs ~3.7x faster than Dijkstra, with identical path cost
+- Python ML pipeline (`ml/`) that cuts ETA error by 27% against a constant-speed baseline on held-out routes
 
 ## Architecture
 
 ```
-com.hydcommute
-├── graph
-│   └── OverpassGraphLoader.java   # Parses Overpass JSON → in-memory Graph (nodes + adjacency)
-├── routing
-│   ├── RoutingStrategy.java       # Interface: findShortestPath(source, target) -> RouteResult
-│   ├── Dijkstras.java             # Dijkstra's algorithm implementation
-│   ├── Astar.java                 # A* implementation (haversine heuristic)
-│   └── RouteResult.java           # path, distance, nodesExplored, timeTakenMillis
-├── config
-│   └── GraphConfig.java           # Loads the graph once at startup, exposes it as a Spring bean
-├── web
-│   └── RouteController.java       # REST endpoint, depends only on RoutingStrategy
-└── RouteOptimizerApplication.java # Spring Boot entry point
+route-optimizer
+├── src/main/java/com/hydcommute
+│   ├── graph
+│   │   └── OverpassGraphLoader.java   # Overpass JSON -> in-memory Graph (nodes + adjacency)
+│   ├── routing
+│   │   ├── RoutingStrategy.java       # Interface: findShortestPath(source, target) -> RouteResult
+│   │   ├── Dijkstras.java
+│   │   ├── Astar.java                 # haversine heuristic
+│   │   ├── RouteResult.java           # path, distance, nodesExplored, timeTakenMillis
+│   │   └── BenchMark.java             # side-by-side algorithm comparison
+│   ├── config
+│   │   └── GraphConfig.java           # loads the graph once at startup as a Spring bean
+│   ├── web
+│   │   └── RouteController.java       # REST endpoint, depends only on RoutingStrategy
+│   └── RouteOptimizerApplication.java
+└── ml
+    ├── collect.py                     # builds the training set from the TomTom Routing API
+    └── train.py                       # trains and evaluates the ETA model
 ```
 
-**Why the Strategy Pattern:** `RouteController` depends only on the `RoutingStrategy` interface, never on `Dijkstras` or `Astar` directly. Adding a third algorithm (e.g. Bidirectional Dijkstra) means writing one new class — the controller, the API contract, and every existing caller stay untouched. This is the concrete example I'd walk through if asked "tell me about a design pattern you've used and why."
+**Why the Strategy Pattern:** `RouteController` depends only on the `RoutingStrategy` interface. Adding a third algorithm (e.g. bidirectional Dijkstra) means writing one new class; the controller and API contract stay unchanged.
 
----
+## Graph construction
 
-## Graph construction details
-
-- **Nodes**: every OSM node with lat/lon, keyed by OSM node ID
-- **Edges**: built by walking each way's ordered node list and connecting consecutive nodes
-  - `oneway=yes` ways produce a single directed edge
-  - all other ways produce edges in both directions
-  - edge weight = **haversine (great-circle) distance in meters** between endpoints
-- **Missing nodes**: ways occasionally reference node IDs not present in a clipped/bounded export. These are skipped safely rather than throwing, since a bounded extract of a city will always have some edge-of-map references.
-
-This means the graph is a **directed graph**, not an undirected one dressed up to look symmetric — oneway streets are modeled correctly, which matters for a routing engine meant to reflect real driving constraints.
-
----
+- **Nodes:** every OSM node with lat/lon, keyed by OSM node ID
+- **Edges:** consecutive nodes along each way are connected
+  - `oneway=yes` produces a single directed edge; all other ways produce edges in both directions
+  - Edge weight is the haversine distance in meters
+- **Missing nodes:** ways that reference nodes absent from a clipped export are skipped instead of throwing
 
 ## Algorithms
 
-### Dijkstra
-Classic uniform-cost search — explores nodes in order of accumulated distance from the source, guaranteeing the shortest path with no assumptions about the graph beyond non-negative weights.
+**Dijkstra:** uniform-cost search; explores nodes in order of distance from the source and guarantees the shortest path for non-negative weights.
 
-### A*
-Same guarantee of optimality, but guided by a heuristic: `f(n) = g(n) + h(n)`, where `g(n)` is the actual distance traveled so far and `h(n)` is the **haversine distance from `n` to the target** — a straight-line lower bound on remaining distance.
+**A\*:** uses `f(n) = g(n) + h(n)`, where `h(n)` is the haversine distance to the target. Haversine never overestimates the road distance, so it is admissible and A* stays optimal.
 
-Haversine is an **admissible heuristic** here because it can never overestimate the true road distance (the straight line between two points is always ≤ the road distance between them). This is what keeps A* both optimal and correct, not just fast.
+### Benchmark
 
----
-
-## Benchmark: Dijkstra vs A*
-
-Same source/target pair, same graph, same machine:
+Same source/target pair, same graph, same machine (single run):
 
 | Metric | Dijkstra | A* | Difference |
 |---|---|---|---|
-| Nodes explored | 240,176 | 50,315 | **79% fewer** |
-| Time taken | 397 ms | 106 ms | **~3.7x faster** |
-| Path distance | 14,091.98 m | 14,091.98 m | **identical** (correctness check) |
+| Nodes explored | 240,176 | 50,315 | 79% fewer |
+| Time taken | 397 ms | 106 ms | ~3.7x faster |
+| Path distance | 14,091.98 m | 14,091.98 m | identical |
 
-The identical path distance is the important control here — it confirms A* isn't finding a *shorter* or *different* path, it's finding the **same optimal path while examining far fewer nodes**, because the heuristic prunes search directions that can't possibly lead toward the target.
+The identical distance confirms A* finds the same optimal path while examining far fewer nodes.
 
-> Note: single-run numbers on one source/target pair. Multiple pairs show the same pattern; A* consistently explores a fraction of the nodes Dijkstra does, with the gap widening as source/target distance increases.
+## ETA prediction model (`ml/`)
 
----
+Distance-only routing assumes a constant speed. This component learns how average speed varies with the time of day, day type, route length and location.
+
+**Data:** 1,799 samples across 300 Hyderabad routes. Each route's origin and destination are random graph nodes 2-15 km apart, queried at 6 random hour/day combinations through the TomTom Routing API (`routeType=shortest`, historical traffic via `departAt`).
+
+**Model:** gradient boosting regressor predicting average speed (m/s); ETA = route length / predicted speed.
+
+**Features:** cyclic hour encoding (sin/cos), weekend flag, route length, straight-line distance, origin and destination coordinates.
+
+**Evaluation:** train/test split grouped by route, so the same route never appears in both sets, plus 5-fold grouped cross-validation.
+
+| Held-out routes | MAE | RMSE |
+|---|---|---|
+| Constant-speed baseline | 438.8 s | 550.3 s |
+| Gradient boosting | 321.6 s | 426.5 s |
+
+MAE improves by about 27%, RMSE by about 22%.
+
+**Limitations**
+- Train MAE (173.6 s) is well below test MAE (321.6 s), so the model overfits somewhat given the small dataset
+- Labels come from historical traffic patterns, not live traffic
+- An average error of about 5 minutes is still large; more data and more features (road class, speed limits) are the obvious next steps
+- The model is not yet integrated into the Spring Boot API
+
+**Run it**
+
+```
+cd ml
+pip install -r requirements.txt
+python collect.py <TOMTOM_API_KEY> ../Source.json 300
+python train.py
+```
+
+`samples.csv` and `eta_model.joblib` are generated locally and not committed.
 
 ## API
 
@@ -89,16 +102,14 @@ The identical path distance is the important control here — it confirms A* isn
 
 | Param | Type | Required | Description |
 |---|---|---|---|
-| `source` | long | yes | Source node ID (OSM node ID) |
-| `target` | long | yes | Target node ID (OSM node ID) |
-| `algorithm` | string | no | `dijkstra` or `astar` (default: `astar`) |
+| `source` | long | yes | Source OSM node ID |
+| `target` | long | yes | Target OSM node ID |
+| `algorithm` | string | no | `dijkstra` or `astar` (default `astar`) |
 
-**Example:**
 ```
 GET /api/route?source=245640607&target=289658025&algorithm=astar
 ```
 
-**Response:**
 ```json
 {
   "algorithm": "A*",
@@ -109,48 +120,35 @@ GET /api/route?source=245640607&target=289658025&algorithm=astar
 }
 ```
 
-**Error responses:**
-- `400 Bad Request` — unknown `source`/`target` node ID, or invalid `algorithm` value
-- `404 Not Found` — no path exists between the given nodes (e.g. disconnected graph regions)
-
----
+**Errors:** `400` for an unknown node ID or invalid algorithm; `404` when no path exists (e.g. disconnected regions).
 
 ## Tech stack
 
-**Implemented:**
-- Java 21
-- Spring Boot 3.3.2 (REST API)
-- Jackson (Overpass JSON parsing)
-- Maven
+- Java 21, Spring Boot 3.3.2, Jackson, Maven
+- Python, Pandas, NumPy, scikit-learn
+- Data: OpenStreetMap via Overpass API; TomTom Routing API for travel-time labels
 
-**In progress / roadmap:**
-- PostgreSQL + JPA (currently graph is rebuilt from JSON on every startup — no persistence layer yet)
-- Docker
-- JUnit test coverage for routing correctness
-- LRU cache for repeated route queries
+## Running the API locally
 
-This section is kept deliberately honest — nothing here is claimed as done unless it's actually running.
-
----
-
-## Running it locally
-
-```bash
+```
 mvn clean compile
 mvn spring-boot:run
 ```
 
-By default the app loads the graph from the file configured in `application.properties`:
-```properties
-route-optimizer.graph-file=hyderabad.json
+The graph file is set in `application.properties`:
+
+```
+route-optimizer.graph-file=Source.json
 ```
 
-Override at launch if needed:
-```bash
+Override at launch:
+
+```
 mvn spring-boot:run -Dspring-boot.run.arguments=--route-optimizer.graph-file=/path/to/export.json
 ```
 
-Startup logs the graph load time and size:
+Startup logs the graph size and load time:
+
 ```
 Parsed 182537 ways into graph.
 Graph loaded at startup: 700614 nodes, 1518327 edges, 2882 ms
@@ -158,14 +156,13 @@ Graph loaded at startup: 700614 nodes, 1518327 edges, 2882 ms
 
 ## Data source
 
-Road network data exported via [Overpass API](https://overpass-api.de/) / [Overpass Turbo](https://overpass-turbo.eu/) for the Hyderabad, India metro area, filtered to `highway`-tagged ways.
+Road network exported via Overpass API / Overpass Turbo for the Hyderabad metro area, filtered to highway-tagged ways.
 
----
+## Roadmap
 
-## What's next
-
-- JUnit tests covering: shortest-path correctness against known distances, unreachable-node handling, oneway-street directionality
+- Serve the ETA model to the REST API (Flask inference service + `etaSeconds` in the response)
+- Use road class and `maxspeed` tags as model features
+- JUnit tests: shortest-path correctness, unreachable nodes, oneway directionality
 - Custom exceptions instead of generic error maps
-- PostgreSQL persistence so the graph doesn't rebuild from JSON on every restart
-- LRU cache for frequently-queried route pairs
-- Dockerized deployment
+- PostgreSQL persistence so the graph is not rebuilt on every restart
+- LRU cache for repeated route queries; Docker deployment
