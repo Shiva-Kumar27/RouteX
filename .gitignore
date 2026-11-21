@@ -21,3 +21,7 @@ Thumbs.db
 
 # Application config with local paths/secrets (if you add DB creds later)
 application-local.properties
+
+ml/samples.csv
+ml/eta_model.joblib
+ml/__pycache__/
